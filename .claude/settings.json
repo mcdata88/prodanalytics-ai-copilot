@@ -1,0 +1,7 @@
+{
+  "enabledMcpjsonServers": ["ipa-analytics"],
+  "permissions": {
+    "allow": ["mcp__ipa-analytics__get_metric_definitions", "mcp__ipa-analytics__list_schema", "mcp__ipa-analytics__run_readonly_sql", "Write(outputs/**)"],
+    "deny": ["Edit(data/metrics.yml)", "Write(data/metrics.yml)"]
+  }
+}
