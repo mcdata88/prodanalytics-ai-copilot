@@ -1,0 +1,106 @@
+# Governed semantic layer for the IPA AI Co-Pilot.
+# Single source of truth for KPI formulas, grains, and cohort exclusions.
+# Served read-only to agents via the `get_metric_definitions()` MCP tool.
+version: "1.0"
+owner: "Internal Product Analytics"
+
+reporting_calendar:
+  week_grain: "ISO weeks starting Monday (week_start)."
+  latest_complete_week: "SELECT MAX(week_start) FROM weekly_product_usage"
+  prior_week: "MAX(week_start) - INTERVAL 7 DAY"
+  as_of_date: "MAX(week_start) + INTERVAL 7 DAY  -- the day after the latest complete week ends"
+  renewal_window_rule: "'Near-term renewal' = renewal_date >= as_of_date AND renewal_date < as_of_date + INTERVAL 90 DAY. Never use CURRENT_DATE; the dataset is a fixed snapshot."
+
+dimensions:
+  arr_tier: ["SMB", "Mid-Market", "Enterprise"]
+  product_name: ["Infra Monitoring", "APM", "Log Management", "Cloud Security"]
+
+tables:
+  accounts:
+    description: "B2B customer accounts with ARR, segment tier, and renewal dates. One row per account."
+    columns:
+      account_id: "Primary key, e.g. ACC-0001."
+      account_name: "Synthetic customer company name."
+      arr_tier: "Segment: SMB (<$75K), Mid-Market ($75K-$400K), Enterprise (>$400K)."
+      current_arr: "Annual recurring revenue (USD) at the as-of date."
+      prior_quarter_arr: "ARR (USD) at the end of the prior quarter. 0 = net-new logo this quarter."
+      renewal_date: "Next contract renewal date."
+      health_status: "CSM health flag: Healthy, At Risk, Critical."
+  weekly_product_usage:
+    description: "Weekly active usage telemetry. One row per week_start x account_id x product_name the account is provisioned on."
+    columns:
+      week_start: "Monday of the usage week (DATE)."
+      account_id: "FK to accounts.account_id."
+      product_name: "Infra Monitoring | APM | Log Management | Cloud Security."
+      active_users: "Distinct users active in the product that week."
+      ingestion_gb: "Telemetry volume ingested that week (GB)."
+      is_adopted: "TRUE when the account met the product's minimum weekly usage threshold (see adoption_thresholds)."
+  support_tickets:
+    description: "Unstructured customer support tickets and PM feature requests. No theme label: classification is an analytical step."
+    columns:
+      ticket_id: "Primary key, e.g. TKT-1001."
+      account_id: "FK to accounts.account_id."
+      product_name: "Product the ticket was filed against."
+      created_at: "Ticket creation timestamp."
+      ticket_type: "feature_request | complaint | bug | question."
+      raw_text: "Verbatim customer text."
+
+adoption_thresholds:
+  rule: "is_adopted = active_users >= 3 AND ingestion_gb >= min_weekly_ingestion_gb"
+  min_weekly_ingestion_gb:
+    Infra Monitoring: 10
+    APM: 5
+    Log Management: 25
+    Cloud Security: 2
+
+metrics:
+  product_adoption_rate:
+    label: "Product Adoption Rate"
+    description: "Percentage of active paying accounts provisioned on a product that met its minimum weekly usage threshold."
+    grain: "weekly, product_name, arr_tier"
+    unit: "percent"
+    required_joins: "weekly_product_usage u JOIN accounts a ON u.account_id = a.account_id"
+    sql_expression: "ROUND(100.0 * COUNT(DISTINCT CASE WHEN u.is_adopted = TRUE THEN u.account_id END) / NULLIF(COUNT(DISTINCT a.account_id), 0), 2)"
+    filters: "a.current_arr > 0"
+    exclusions: "Exclude accounts with current_arr <= 0."
+    wow_delta_convention: "Report WoW change in basis points (1 pp = 100 bps)."
+
+  net_dollar_retention:
+    label: "Net Dollar Retention (NDR / NRR)"
+    description: "Ratio of current ARR to prior quarter ARR across the existing customer cohort."
+    grain: "arr_tier"
+    unit: "percent"
+    required_joins: "accounts a"
+    sql_expression: "ROUND(100.0 * SUM(a.current_arr) / NULLIF(SUM(a.prior_quarter_arr), 0), 2)"
+    filters: "a.prior_quarter_arr > 0"
+    exclusions: "Cohort includes only accounts with prior_quarter_arr > 0."
+
+  expansion_arr:
+    label: "Expansion ARR"
+    description: "Net positive ARR growth from existing accounts compared to prior quarter."
+    grain: "arr_tier"
+    unit: "USD"
+    required_joins: "accounts a"
+    sql_expression: "SUM(CASE WHEN a.current_arr > a.prior_quarter_arr THEN a.current_arr - a.prior_quarter_arr ELSE 0 END)"
+    filters: "a.prior_quarter_arr > 0"
+    exclusions: "Excludes net-new logos (prior_quarter_arr = 0)."
+
+  weekly_ingestion_volume:
+    label: "Weekly Data Ingestion (GB)"
+    description: "Total telemetry volume ingested per product line."
+    grain: "weekly, product_name, arr_tier"
+    unit: "GB"
+    required_joins: "weekly_product_usage u JOIN accounts a ON u.account_id = a.account_id"
+    sql_expression: "ROUND(SUM(u.ingestion_gb), 2)"
+    filters: "a.current_arr > 0"
+    exclusions: "None beyond paying-account filter."
+
+  total_arr:
+    label: "Total ARR"
+    description: "Sum of current ARR across paying accounts."
+    grain: "arr_tier"
+    unit: "USD"
+    required_joins: "accounts a"
+    sql_expression: "SUM(a.current_arr)"
+    filters: "a.current_arr > 0"
+    exclusions: "Exclude accounts with current_arr <= 0."
